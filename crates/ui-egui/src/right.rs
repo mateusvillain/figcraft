@@ -1146,7 +1146,12 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
         Some(l) => {
             // The last paint is on top: shown first. Rows drag to reorder.
             let mut drag = ListDrag::new(ui, if fills { "fills" } else { "strokes" });
+            // A border token's chip stands for the stroke it colours.
+            let border_token = !fills && crate::tokens_ui::bound_token(doc, &ids, "border").is_some();
             for (i, p) in l.iter().enumerate().rev() {
+                if border_token && i == 0 {
+                    continue;
+                }
                 let r = paint_row(app, ui, &ids, i, p, fills);
                 drag.row(ui, i, r, r, || paint_label(p));
             }
@@ -1162,6 +1167,8 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
         }
     }
     if !fills && !empty {
+        // A border token sets the weight and dashes: only the alignment stays to choose.
+        let border_token = crate::tokens_ui::bound_token(doc, &ids, "border").is_some();
         let weight = common(doc, sel, |n| n.stroke.weight);
         let align = common(doc, sel, |n| n.stroke.align);
         let half = (ui.available_width() - PAD * 2.0 - 8.0) / 2.0;
@@ -1185,6 +1192,9 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
                     }
                 }
             });
+            if border_token {
+                return;
+            }
             let sided = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() || matches!(n.kind, NodeKind::Rectangle)));
             let weight_w = half - if sided { 60.0 } else { 32.0 };
             let e = crate::variable_ui::number_field_mixed(
@@ -1226,7 +1236,7 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
         });
         // Per-side weights, two to a row (like the corner radii) so a bound variable's name fits:
         // each side binds to a number variable on its own.
-        if let Some(sides) = common(doc, sel, |n| n.stroke.sides).flatten() {
+        if let Some(sides) = common(doc, sel, |n| n.stroke.sides).flatten().filter(|_| !border_token) {
             let col = widgets::col_width(ui.available_width());
             let fields = ["T", "R", "B", "L"].into_iter().zip(figcraft_engine::cmd::props::STROKE_SIDES);
             for first in [0, 2] {
@@ -1239,7 +1249,7 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
                 });
             }
         }
-        if ui.data(|d| d.get_temp::<bool>(Id::new("stroke_adv"))).unwrap_or(false) {
+        if !border_token && ui.data(|d| d.get_temp::<bool>(Id::new("stroke_adv"))).unwrap_or(false) {
             stroke_settings(app, ui, doc, sel);
         }
     }
@@ -1677,7 +1687,12 @@ fn effects(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let Some(list) = list else { return };
     let mut drag = ListDrag::new(ui, "effects");
     let mut removed = None;
+    // A shadow token's chip stands for the shadows it sets.
+    let shadow_token = crate::tokens_ui::bound_token(doc, &ids, "shadow").is_some();
     for (i, e) in list.iter().enumerate().rev() {
+        if shadow_token && matches!(e.kind, EffectKind::DropShadow(_) | EffectKind::InnerShadow(_)) {
+            continue;
+        }
         let mut open = effect_open(ui.ctx(), i);
         let header = row_rect(ui, 32.0, |ui| {
             if icons::button(ui, Icon::Effects, 24.0, open, tr("Effect settings")).clicked() {

@@ -113,7 +113,9 @@ pub fn typography(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId])
     crate::variable_ui::bound_row(app, ui, &ids, "characters", VariableType::String, Lead::Icon(Icon::Text, tr("Text")), f32::INFINITY);
     // A text style: its chip stands for the font rows (they show again when the chars differ).
     crate::style_picker::chip(app, ui, doc, &ids, crate::style_picker::StyleSlot::Text);
-    if !matches!(crate::style_picker::text_link(app, doc, &ids), Some(Some(_))) {
+    // So does a typography token: it sets the family, weight, size, line height and letter spacing.
+    let token = crate::tokens_ui::bound_token(doc, &ids, "typography").is_some();
+    if !token && !matches!(crate::style_picker::text_link(app, doc, &ids), Some(Some(_))) {
         font_rows(app, ui, &ids, &styles, editing, &apply_style);
     }
     paragraph_rows(app, ui, doc, &ids, &styles, &apply_style);
