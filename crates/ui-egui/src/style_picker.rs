@@ -118,6 +118,20 @@ impl StyleSlot {
         }
     }
 
+    /// The token fields this slot stands for when working with design tokens (colours and
+    /// gradients for paints, borders for strokes, shadows for effects, typography for text), and
+    /// the picker's title; `None` for slots no token type stands for (layout grids).
+    pub fn token_fields(self) -> Option<(Vec<String>, &'static str)> {
+        let f = |v: &[&str]| v.iter().map(|x| x.to_string()).collect();
+        Some(match self {
+            StyleSlot::Fill => (f(&["fill", "fills/0/gradient"]), crate::i18n::tr_noop("Color tokens")),
+            StyleSlot::Stroke => (f(&["stroke", "strokes/0/gradient", "border"]), crate::i18n::tr_noop("Stroke tokens")),
+            StyleSlot::Effect => (f(&["shadow"]), crate::i18n::tr_noop("Shadow tokens")),
+            StyleSlot::Text => (f(&["typography"]), crate::i18n::tr_noop("Typography tokens")),
+            StyleSlot::Grid => return None,
+        })
+    }
+
     fn holds(self, k: &StyleKind) -> bool {
         matches!(
             (k, self),
@@ -166,6 +180,13 @@ impl Picker {
 
 /// Open the picker for `slot` of `ids`, level with the pointer.
 pub fn open(app: &mut FigApp, ui: &Ui, ids: &[NodeId], slot: StyleSlot) {
+    // Working with design tokens, slots that a token type stands for offer tokens instead.
+    if app.session.prefs.design_tokens
+        && let Some((fields, title)) = slot.token_fields()
+    {
+        crate::tokens_ui::open_slot(ui, ids, fields, title);
+        return;
+    }
     let y = ui.input(|i| i.pointer.interact_pos()).map_or(140.0, |p| p.y - 12.0);
     app.ui.style_picker = Some(Picker { slot, ids: ids.to_vec(), y, query: String::new(), edit: None });
 }
@@ -264,8 +285,6 @@ impl Key {
 enum Act {
     Apply(Key),
     Bind(crate::variable_ui::Pick),
-    /// Bind a design token (path) to the slot's paint colour.
-    BindToken(String),
     Create,
     Detach,
     Edit(String),
@@ -556,24 +575,11 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
             sources.push((Some(l.as_ref()), list));
         }
     }
-    // Working with design tokens, colour slots offer colour tokens instead of colour variables.
-    let use_tokens = app.session.prefs.design_tokens;
-    let colors = if slot.paints() && !use_tokens {
+    let colors = if slot.paints() {
         crate::variable_ui::groups(doc, &libs, |_, v| v.kind == VariableType::Color && (q.is_empty() || v.name.to_lowercase().contains(&q)))
     } else {
         Vec::new()
     };
-    let resolved = if slot.paints() && use_tokens {
-        let input = p.ids.first().map(|i| doc.token_input_for(*i)).unwrap_or_default();
-        doc.tokens.resolve(&input)
-    } else {
-        Default::default()
-    };
-    let color_tokens: Vec<&figcraft_doc::ResolvedToken> = resolved
-        .tokens
-        .values()
-        .filter(|x| x.error.is_none() && x.kind == Some(figcraft_doc::TokenType::Color) && (q.is_empty() || x.path.to_lowercase().contains(&q)))
-        .collect();
     egui::ScrollArea::vertical().id_salt("style_picker_scroll").max_height(320.0).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         if sources.iter().all(|(_, l)| l.is_empty()) {
@@ -636,15 +642,6 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
         if !colors.is_empty() {
             ui.add_space(6.0);
             caption(ui, tr("Color variables"));
-        }
-        if !color_tokens.is_empty() {
-            ui.add_space(6.0);
-            caption(ui, tr("Color tokens"));
-        }
-        for tok in &color_tokens {
-            if crate::tokens_ui::token_row(ui, tok, W, false) {
-                out.act = Some(Act::BindToken(tok.path.clone()));
-            }
         }
         for (lib, c, vars) in &colors {
             crate::variable_ui::group_caption(ui, *lib, c);
@@ -962,10 +959,6 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
             crate::variable_ui::bind(app, &ids, slot.key(), &pick);
             close = true;
         }
-        Some(Act::BindToken(path)) => {
-            app.run("token.bind", json!({"ids": ids, "field": slot.key(), "token": path}));
-            close = true;
-        }
         Some(Act::Detach) => {
             app.run("style.detach", json!({"ids": ids, "which": slot.key()}));
         }
@@ -1059,6 +1052,10 @@ pub fn local_styles(app: &mut FigApp, ui: &mut Ui, doc: &Document) {
     let mut run: Option<(&'static str, Value)> = None;
     let mut edit: Option<(StyleSlot, String)> = None;
     for slot in [StyleSlot::Text, StyleSlot::Fill, StyleSlot::Effect, StyleSlot::Grid] {
+        // Working with design tokens, only styles no token type stands for are listed.
+        if app.session.prefs.design_tokens && slot.token_fields().is_some() {
+            continue;
+        }
         let groups = by_folder(library::local_styles(doc).filter(|s| slot.holds(&s.kind)));
         if groups.is_empty() {
             continue;

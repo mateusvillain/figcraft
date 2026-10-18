@@ -75,6 +75,8 @@ pub struct Editor {
     upload: Option<Option<Src>>,
     /// The open alias picker.
     alias: Option<AliasPick>,
+    /// Composite tokens whose fields are shown (by source and path); the rest show one row.
+    open_fields: std::collections::BTreeSet<String>,
 }
 
 /// The alias picker: which value it sets (a token, or one field of a composite token) to an alias
@@ -885,6 +887,10 @@ fn parse_edit(kind: Option<TokenType>, text: &str) -> Value {
     }
 }
 
+fn id_of_fold(key: &str) -> Id {
+    Id::new(("token_fold", key))
+}
+
 fn token_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tok: &dt::RawToken, res: Option<&ResolvedToken>, width: f32, st: &mut Editor) {
     let t = Tokens::get(ui.ctx());
     let (r, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
@@ -914,6 +920,23 @@ fn token_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tok: &dt::RawToken, res: 
     let body = Rect::from_min_max(pos2(r.min.x + NAME_W, r.center().y - 12.0), pos2(r.min.x + NAME_W + VALUE_W - 8.0, r.center().y + 12.0));
     let id = Id::new(("token_cell", &tok.path, format!("{src:?}")));
     let expanded = tok.kind.is_some_and(|k| k.is_composite() && k != TokenType::StrokeStyle) && dt::alias_of(&tok.value).is_none();
+    // Composite tokens fold their fields away; the chevron left of the preview shows them.
+    let fold_key = format!("{src:?}/{}", tok.path);
+    let unfolded = st.open_fields.contains(&fold_key);
+    if expanded {
+        let chev = Rect::from_center_size(pos2(r.min.x + 9.0, r.center().y), vec2(14.0, 14.0));
+        let tip = if unfolded { tr("Hide fields") } else { tr("Show fields") };
+        let cresp = ui.interact(chev.expand(3.0), id_of_fold(&fold_key), Sense::click()).on_hover_text(tip);
+        let icon = if unfolded { Icon::Chevron } else { Icon::ChevronRight };
+        icons::paint(ui.painter(), chev.shrink(2.0), icon, if cresp.hovered() { t.icon } else { t.icon_secondary });
+        if cresp.clicked() {
+            if unfolded {
+                st.open_fields.remove(&fold_key);
+            } else {
+                st.open_fields.insert(fold_key.clone());
+            }
+        }
+    }
     match tok.kind {
         Some(k) if expanded => {
             ui.painter().rect_filled(body, CornerRadius::same(5), t.field);
@@ -962,7 +985,10 @@ fn token_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tok: &dt::RawToken, res: 
             ui.close();
         }
     });
-    if expanded && let Some(k) = tok.kind {
+    if expanded
+        && unfolded
+        && let Some(k) = tok.kind
+    {
         field_rows(app, ui, st, src, tok, res, k, width);
     }
     let bottom = ui.cursor().min.y;

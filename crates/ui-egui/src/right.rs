@@ -1114,16 +1114,11 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
     let title = if fills { tr("Fill") } else { tr("Stroke") };
     let empty = list.as_ref().is_none_or(|l| l.is_empty());
     let slot = if fills { StyleSlot::Fill } else { StyleSlot::Stroke };
-    let mut buttons = vec![(Icon::Styles, tr("Styles")), (Icon::Plus, if fills { tr("Add fill") } else { tr("Add stroke") })];
-    // Working with design tokens: a gradient token for the top fill, a border token for strokes.
-    let token_field = if fills { format!("fills/{}/gradient", list.as_ref().map_or(0, |l| l.len().saturating_sub(1))) } else { "border".to_string() };
-    if app.session.prefs.design_tokens {
-        buttons.push((Icon::Variable, if fills { tr("Apply gradient token") } else { tr("Apply border token") }));
-    }
+    // Working with design tokens, the Styles button offers colour, gradient (and border) tokens.
+    let styles = if app.session.prefs.design_tokens { tr("Tokens") } else { tr("Styles") };
+    let buttons = [(Icon::Styles, styles), (Icon::Plus, if fills { tr("Add fill") } else { tr("Add stroke") })];
     if let Some(i) = widgets::section_header(ui, title, &buttons, empty) {
-        if i == 2 {
-            crate::tokens_ui::open_at_pointer(ui, &ids, &token_field);
-        } else if i == 1 {
+        if i == 1 {
             // The new paint goes on top; open its picker. A mixed selection has no one index to edit.
             if app.run(if fills { "fill.add" } else { "stroke.add" }, json!({"ids": ids})).is_some()
                 && let Some(l) = &list
@@ -1668,17 +1663,13 @@ fn effects(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let ids = sel.to_vec();
     let list = common(doc, sel, |n| n.effects.clone());
     let empty = list.as_ref().is_none_or(|l| l.is_empty());
-    let mut buttons = vec![(Icon::Styles, tr("Styles")), (Icon::Plus, tr("Add effect"))];
-    if app.session.prefs.design_tokens {
-        buttons.push((Icon::Variable, tr("Apply shadow token")));
-    }
-    if let Some(i) = widgets::section_header(ui, tr("Effects"), &buttons, empty) {
-        match i {
-            1 => {
-                app.run("effect.add", json!({"ids": ids, "type": "dropShadow"}));
-            }
-            2 => crate::tokens_ui::open_at_pointer(ui, &ids, "shadow"),
-            _ => style_picker::open(app, ui, &ids, StyleSlot::Effect),
+    // Working with design tokens, the Styles button offers shadow tokens.
+    let styles = if app.session.prefs.design_tokens { tr("Tokens") } else { tr("Styles") };
+    if let Some(i) = widgets::section_header(ui, tr("Effects"), &[(Icon::Styles, styles), (Icon::Plus, tr("Add effect"))], empty) {
+        if i == 1 {
+            app.run("effect.add", json!({"ids": ids, "type": "dropShadow"}));
+        } else {
+            style_picker::open(app, ui, &ids, StyleSlot::Effect);
         }
     }
     crate::variable_ui::bound_row(app, ui, &ids, "shadow", VariableType::Color, Lead::Icon(Icon::Effects, tr("Shadow")), f32::INFINITY);

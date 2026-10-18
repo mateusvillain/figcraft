@@ -12,11 +12,13 @@ use crate::FigApp;
 use crate::i18n::tr;
 use crate::theme::{Tokens, regular, semibold};
 
-/// The open token picker: the layers and field it binds, where it opens.
+/// The open token picker: the layers and the fields it binds (a token goes to the first field
+/// that takes its type), its title, where it opens.
 #[derive(Clone)]
 struct Picker {
     ids: Vec<NodeId>,
-    field: String,
+    fields: Vec<String>,
+    title: Option<&'static str>,
     at: Pos2,
 }
 
@@ -41,13 +43,16 @@ pub fn on(ctx: &egui::Context) -> bool {
 
 /// Open the picker for `field` of `ids` at `at`.
 pub fn open(ctx: &egui::Context, ids: &[NodeId], field: &str, at: Pos2) {
-    ctx.data_mut(|d| d.insert_temp(picker_id(), Picker { ids: ids.to_vec(), field: field.to_string(), at }));
+    let p = Picker { ids: ids.to_vec(), fields: vec![field.to_string()], title: None, at };
+    ctx.data_mut(|d| d.insert_temp(picker_id(), p));
 }
 
-/// Open the picker under the pointer (a section header's button).
-pub fn open_at_pointer(ui: &Ui, ids: &[NodeId], field: &str) {
+/// Open the picker for several fields of `ids` under the pointer (a style slot's tokens: colours
+/// and gradients for a fill…), titled `title`.
+pub fn open_slot(ui: &Ui, ids: &[NodeId], fields: Vec<String>, title: &'static str) {
     let at = ui.input(|i| i.pointer.interact_pos()).unwrap_or_default();
-    open(ui.ctx(), ids, field, at);
+    let p = Picker { ids: ids.to_vec(), fields, title: Some(title), at };
+    ui.ctx().data_mut(|d| d.insert_temp(picker_id(), p));
 }
 
 /// Whether the picker is open.
@@ -150,22 +155,27 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
     let mut query: String = ctx.data(|d| d.get_temp(query_id)).unwrap_or_default();
     let q = query.trim().to_lowercase();
     let first = p.ids.first().copied();
-    let takes = first.map(|i| figcraft_engine::cmd::tokens::field_types(&doc, i, &p.field)).unwrap_or(&[]);
+    // The field each type goes to: the first of the picker's fields that takes it.
+    let field_for = |k: TokenType| -> Option<&String> {
+        let id = first?;
+        p.fields.iter().find(|f| figcraft_engine::cmd::tokens::field_types(&doc, id, f).contains(&k))
+    };
     let input = first.map(|i| doc.token_input_for(i)).unwrap_or_default();
     let resolved = doc.tokens.resolve(&input);
-    let current = bound_token(&doc, &p.ids, &p.field);
+    let current: Vec<String> = p.fields.iter().filter_map(|f| bound_token(&doc, &p.ids, f)).collect();
     let fits: Vec<&ResolvedToken> = resolved
         .tokens
         .values()
-        .filter(|x| x.error.is_none() && x.kind.is_some_and(|k| takes.contains(&k)))
+        .filter(|x| x.error.is_none() && x.kind.is_some_and(|k| field_for(k).is_some()))
         .filter(|x| q.is_empty() || x.path.to_lowercase().contains(&q))
         .collect();
-    let mut chosen: Option<String> = None;
+    let takes_any = TokenType::ALL.iter().any(|k| field_for(*k).is_some());
+    let mut chosen: Option<(String, String)> = None;
     let mut close = false;
     let area = egui::Area::new(Id::new("token_picker_area")).order(egui::Order::Foreground).fixed_pos(p.at + vec2(0.0, 4.0)).show(ctx, |ui| {
         egui::Frame::NONE.fill(t.menu).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
             ui.set_width(260.0);
-            ui.label(egui::RichText::new(tr("Design tokens")).font(semibold(11.0)).color(t.menu_text));
+            ui.label(egui::RichText::new(p.title.map_or(tr("Design tokens"), tr)).font(semibold(11.0)).color(t.menu_text));
             ui.add_space(4.0);
             let r = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tr("Search")).font(regular(11.0)).desired_width(244.0));
             crate::widgets::select_all_on_focus(ui, &r, &query);
@@ -185,13 +195,15 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
                             ui.label(egui::RichText::new(g.replace('.', " / ")).font(regular(10.0)).color(t.menu_dim));
                         }
                     }
-                    if token_row(ui, tok, 244.0, current.as_deref() == Some(tok.path.as_str())) {
-                        chosen = Some(tok.path.clone());
+                    if token_row(ui, tok, 244.0, current.contains(&tok.path))
+                        && let Some(f) = tok.kind.and_then(field_for)
+                    {
+                        chosen = Some((f.clone(), tok.path.clone()));
                     }
                 }
             });
             if fits.is_empty() {
-                let msg = if takes.is_empty() {
+                let msg = if !takes_any {
                     tr("No token type fits this property.")
                 } else if resolved.tokens.is_empty() {
                     tr("No design tokens yet. Create them in Design tokens.")
@@ -213,8 +225,14 @@ pub fn picker(app: &mut FigApp, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || clicked_outside {
         close = true;
     }
-    if let Some(path) = chosen {
-        app.run("token.bind", json!({"ids": p.ids, "field": p.field, "token": path}));
+    if let Some((field, path)) = chosen {
+        // One token per slot: a colour replaces a gradient token on the same paint and back.
+        for other in p.fields.iter().filter(|f| **f != field) {
+            if bound_token(&doc, &p.ids, other).is_some() {
+                app.run("token.bind", json!({"ids": p.ids, "field": other, "token": null}));
+            }
+        }
+        app.run("token.bind", json!({"ids": p.ids, "field": field, "token": path}));
         close = true;
     }
     if close {

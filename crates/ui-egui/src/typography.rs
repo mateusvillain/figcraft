@@ -90,21 +90,26 @@ pub fn typography(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId])
     let styles = target_styles(doc, &ids, range);
     let apply_style = |app: &mut FigApp, key: &str, v: Value| commit_text(app, &ids, range, json!({ key: v }));
 
-    // Working with design tokens, the first button applies a typography token.
-    let tokens = app.session.prefs.design_tokens;
-    let apply = if tokens { tr("Apply typography token") } else { tr("Apply variable to text") };
-    let hdr = widgets::section_header(ui, tr("Typography"), &[(Icon::Variable, apply), (Icon::Styles, tr("Text styles"))], false);
-    if hdr == Some(0) {
-        if tokens {
-            crate::tokens_ui::open_at_pointer(ui, &ids, "typography");
-        } else {
+    // Working with design tokens, typography tokens stand for text styles: one button picks them.
+    if app.session.prefs.design_tokens {
+        if widgets::section_header(ui, tr("Typography"), &[(Icon::Styles, tr("Typography tokens"))], false) == Some(0) {
+            crate::style_picker::open(app, ui, &ids, crate::style_picker::StyleSlot::Text);
+        }
+    } else {
+        let hdr = widgets::section_header(
+            ui,
+            tr("Typography"),
+            &[(Icon::Variable, tr("Apply variable to text")), (Icon::Styles, tr("Text styles"))],
+            false,
+        );
+        if hdr == Some(0) {
             crate::variable_ui::open_at_pointer(ui, &ids, "characters", VariableType::String);
+        }
+        if hdr == Some(1) {
+            crate::style_picker::open(app, ui, &ids, crate::style_picker::StyleSlot::Text);
         }
     }
     crate::variable_ui::bound_row(app, ui, &ids, "typography", VariableType::String, Lead::Icon(Icon::Text, tr("Typography")), f32::INFINITY);
-    if hdr == Some(1) {
-        crate::style_picker::open(app, ui, &ids, crate::style_picker::StyleSlot::Text);
-    }
     crate::variable_ui::bound_row(app, ui, &ids, "characters", VariableType::String, Lead::Icon(Icon::Text, tr("Text")), f32::INFINITY);
     // A text style: its chip stands for the font rows (they show again when the chars differ).
     crate::style_picker::chip(app, ui, doc, &ids, crate::style_picker::StyleSlot::Text);

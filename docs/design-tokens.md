@@ -21,7 +21,7 @@ it. A file keeps its variables and its tokens either way, and both keep applying
 - Every value has an alias button (on hover) that opens a searchable list of tokens of its type;
   picking one writes `{its.path}`. Typing `{group.token}` works too. An alias shows as a chip:
   click it to pick another, or detach it to keep the value it resolves to.
-- Composite tokens show each field on a row of its own, with its own field and alias button:
+- Composite tokens fold to one row; the chevron shows each field on a row of its own, with its own field and alias button:
   typography (family, size, weight, letter spacing, line height), border, transition, shadow
   (each layer; add and remove layers) and gradient (each stop; add and remove stops).
 
@@ -36,6 +36,14 @@ The [resolver module](https://www.designtokens.org/tr/2025.10/resolver/) organis
 
 The file chooses a context per modifier (the editor's header); frames, sections, components and
 instances can choose another (Design panel ▸ Token contexts), inherited by their layers.
+
+## Styles while working with tokens
+
+With Design tokens on, styles a token type stands for step aside so the two don't compete:
+the Fill, Stroke, Effects and Typography sections' style buttons open the token picker (colour
+and gradient tokens; plus border tokens for strokes; shadow tokens; typography tokens), no paint,
+effect or text styles are created from them, and the page's Local styles list only layout grid
+styles. Styles already applied to layers keep working and can be detached.
 
 ## Binding
 
