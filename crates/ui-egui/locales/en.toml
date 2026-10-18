@@ -8,6 +8,15 @@
 name = "English"
 
 [ui]
+"Use another token (alias)" = "Use another token (alias)"
+"Timing function" = "Timing function"
+"Stop {n}" = "Stop {n}"
+"Shadow {n}" = "Shadow {n}"
+"Offset Y" = "Offset Y"
+"Offset X" = "Offset X"
+"Alias: a {type} token" = "Alias: a {type} token"
+"+ Add stop" = "+ Add stop"
+"+ Add shadow" = "+ Add shadow"
 "% of all commits" = "% of all commits"
 "ZIP: resolver and a file per set and context…" = "ZIP: resolver and a file per set and context…"
 "ZIP or JSON file…" = "ZIP or JSON file…"

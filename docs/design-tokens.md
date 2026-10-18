@@ -16,6 +16,15 @@ it. A file keeps its variables and its tokens either way, and both keep applying
 - Aliases: `{group.token}` and `$ref` JSON pointers, resolved after merging; cycles, missing
   targets and type mismatches are reported per token.
 
+## Editing
+
+- Every value has an alias button (on hover) that opens a searchable list of tokens of its type;
+  picking one writes `{its.path}`. Typing `{group.token}` works too. An alias shows as a chip:
+  click it to pick another, or detach it to keep the value it resolves to.
+- Composite tokens show each field on a row of its own, with its own field and alias button:
+  typography (family, size, weight, letter spacing, line height), border, transition, shadow
+  (each layer; add and remove layers) and gradient (each stop; add and remove stops).
+
 ## Themes and brands: sets and modifiers
 
 The [resolver module](https://www.designtokens.org/tr/2025.10/resolver/) organises tokens:

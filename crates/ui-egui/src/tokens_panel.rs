@@ -73,6 +73,110 @@ pub struct Editor {
     paste: Option<String>,
     /// A file asked for in the browser, not read yet (and the set or context it goes into).
     upload: Option<Option<Src>>,
+    /// The open alias picker.
+    alias: Option<AliasPick>,
+}
+
+/// The alias picker: which value it sets (a token, or one field of a composite token) to an alias
+/// of a token of `kind`.
+#[derive(Clone)]
+struct AliasPick {
+    path: String,
+    /// Where in the token's value (empty: the whole value; `["fontSize"]`, `["0", "color"]`…).
+    sub: Vec<String>,
+    kind: TokenType,
+    at: egui::Pos2,
+    query: String,
+}
+
+/// What a field of a composite token holds.
+#[derive(Clone, Copy, PartialEq)]
+enum FieldKind {
+    Token(TokenType),
+    Bool,
+}
+
+type Field = (&'static str, FieldKind, &'static str);
+
+const TYPOGRAPHY: &[Field] = &[
+    ("fontFamily", FieldKind::Token(TokenType::FontFamily), tr_noop("Font family")),
+    ("fontSize", FieldKind::Token(TokenType::Dimension), tr_noop("Font size")),
+    ("fontWeight", FieldKind::Token(TokenType::FontWeight), tr_noop("Font weight")),
+    ("letterSpacing", FieldKind::Token(TokenType::Dimension), tr_noop("Letter spacing")),
+    ("lineHeight", FieldKind::Token(TokenType::Number), tr_noop("Line height")),
+];
+const BORDER: &[Field] = &[
+    ("color", FieldKind::Token(TokenType::Color), tr_noop("Color")),
+    ("width", FieldKind::Token(TokenType::Dimension), tr_noop("Width")),
+    ("style", FieldKind::Token(TokenType::StrokeStyle), tr_noop("Style")),
+];
+const TRANSITION: &[Field] = &[
+    ("duration", FieldKind::Token(TokenType::Duration), tr_noop("Duration")),
+    ("delay", FieldKind::Token(TokenType::Duration), tr_noop("Delay")),
+    ("timingFunction", FieldKind::Token(TokenType::CubicBezier), tr_noop("Timing function")),
+];
+const SHADOW: &[Field] = &[
+    ("color", FieldKind::Token(TokenType::Color), tr_noop("Color")),
+    ("offsetX", FieldKind::Token(TokenType::Dimension), tr_noop("Offset X")),
+    ("offsetY", FieldKind::Token(TokenType::Dimension), tr_noop("Offset Y")),
+    ("blur", FieldKind::Token(TokenType::Dimension), tr_noop("Blur")),
+    ("spread", FieldKind::Token(TokenType::Dimension), tr_noop("Spread")),
+    ("inset", FieldKind::Bool, tr_noop("Inner shadow")),
+];
+const STOP: &[Field] =
+    &[("color", FieldKind::Token(TokenType::Color), tr_noop("Color")), ("position", FieldKind::Token(TokenType::Number), tr_noop("Position"))];
+
+/// The fields of a composite value of type `kind` (object types only), with their labels.
+fn fields(kind: TokenType) -> &'static [Field] {
+    match kind {
+        TokenType::Typography => TYPOGRAPHY,
+        TokenType::Border => BORDER,
+        TokenType::Transition => TRANSITION,
+        TokenType::Shadow => SHADOW,
+        TokenType::Gradient => STOP,
+        _ => &[],
+    }
+}
+
+/// `value` with the part at `sub` replaced by `new` (made where it's missing).
+fn with_part(value: &Value, sub: &[String], new: Value) -> Value {
+    let Some((last, parents)) = sub.split_last() else { return new };
+    let mut out = value.clone();
+    let mut cur = &mut out;
+    for p in parents {
+        let next = match cur {
+            Value::Object(o) => o.entry(p.clone()).or_insert_with(|| json!({})),
+            Value::Array(a) => match p.parse::<usize>().ok().and_then(|i| a.get_mut(i)) {
+                Some(x) => x,
+                None => return out,
+            },
+            _ => return out,
+        };
+        cur = next;
+    }
+    match cur {
+        Value::Object(o) => {
+            o.insert(last.clone(), new);
+        }
+        Value::Array(a) => {
+            if let Some(x) = last.parse::<usize>().ok().and_then(|i| a.get_mut(i)) {
+                *x = new;
+            }
+        }
+        other => *other = json!({ last.clone(): new }),
+    }
+    out
+}
+
+/// Set the part `sub` of token `path`'s value (as written in `src`) to `new`.
+fn set_part(app: &mut FigApp, src: &Src, path: &str, sub: &[String], new: Value) {
+    let raw = app
+        .session
+        .doc()
+        .ok()
+        .and_then(|d| d.tokens.tree(&src.doc_source()).and_then(|t| dt::token_at(t, path)).and_then(|t| t.get("$value")).cloned())
+        .unwrap_or(Value::Null);
+    app.run("token.set", src.with(json!({"path": path, "value": with_part(&raw, sub, new)})));
 }
 
 /// A token tree: a set, or a modifier's context.
@@ -173,6 +277,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     details(app, ctx, &doc, &mut st);
     paste_dialog(app, ctx, &mut st);
     take_upload(app, ctx, &mut st);
+    alias_picker(app, ctx, &doc, &mut st);
     app.ui.tokens = open.then_some(st);
 }
 
@@ -805,26 +910,26 @@ fn token_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tok: &dt::RawToken, res: 
         let p = ui.painter().with_clip_rect(name_r);
         p.text(name_r.left_center(), Align2::LEFT_CENTER, short, regular(11.0), if tok.deprecated { t.text_tertiary } else { t.text });
     }
-    // The value as written.
+    // The value as written: composite values show their fields on rows of their own.
     let body = Rect::from_min_max(pos2(r.min.x + NAME_W, r.center().y - 12.0), pos2(r.min.x + NAME_W + VALUE_W - 8.0, r.center().y + 12.0));
     let id = Id::new(("token_cell", &tok.path, format!("{src:?}")));
-    ui.painter().rect_filled(body, CornerRadius::same(5), t.field);
-    let mut text_r = body.shrink2(vec2(8.0, 4.0));
-    let literal_color = tok.kind == Some(TokenType::Color) && dt::alias_of(&tok.value).is_none();
-    if literal_color && let Some(c) = dt::color_of(&tok.value) {
-        let cs = Rect::from_center_size(pos2(body.min.x + 13.0, body.center().y), vec2(14.0, 14.0));
-        widgets::paint_swatch(ui.painter(), cs, &figcraft_color::Paint::solid(c));
-        if ui.interact(cs.expand(3.0), id.with("swatch"), Sense::click()).on_hover_text(tr("Edit colour")).clicked() {
-            let (set, modifier, context) = match src {
-                Src::Set(s) => (Some(s.clone()), None, None),
-                Src::Context(m, c) => (None, Some(m.clone()), Some(c.clone())),
-            };
-            app.ui.picker = Some(PickerTarget::Token { set, modifier, context, path: tok.path.clone() });
+    let expanded = tok.kind.is_some_and(|k| k.is_composite() && k != TokenType::StrokeStyle) && dt::alias_of(&tok.value).is_none();
+    match tok.kind {
+        Some(k) if expanded => {
+            ui.painter().rect_filled(body, CornerRadius::same(5), t.field);
+            let text_r = body.shrink2(vec2(8.0, 4.0));
+            let summary = res.map(|x| dt::display(x.kind, &x.value)).unwrap_or_default();
+            ui.painter().with_clip_rect(text_r).text(text_r.left_center(), Align2::LEFT_CENTER, summary, regular(11.0), t.text_secondary);
+            alias_button(ui, st, id, body, &tok.path, &[], k);
         }
-        text_r.min.x = cs.max.x + 8.0;
-    }
-    if let Some(text) = widgets::text_field_inline(ui, id.with("value"), &edit_text(tok.kind, &tok.value), text_r, regular(11.0)) {
-        app.run("token.set", src.with(json!({"path": tok.path, "value": parse_edit(tok.kind, &text)})));
+        Some(k) => value_cell(app, ui, st, src, &tok.path, &[], FieldKind::Token(k), &tok.value, res.map(|x| &x.value), body, id),
+        None => {
+            if let Some(text) =
+                widgets::text_field_inline(ui, id.with("value"), &edit_text(None, &tok.value), body.shrink2(vec2(8.0, 4.0)), regular(11.0))
+            {
+                app.run("token.set", src.with(json!({"path": tok.path, "value": parse_edit(None, &text)})));
+            }
+        }
     }
     // What it resolves to here, or why it doesn't.
     let res_r = Rect::from_min_max(pos2(r.min.x + NAME_W + VALUE_W + 16.0, r.min.y), pos2(r.max.x - 12.0, r.max.y));
@@ -857,7 +962,265 @@ fn token_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tok: &dt::RawToken, res: 
             ui.close();
         }
     });
-    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, t.border));
+    if expanded && let Some(k) = tok.kind {
+        field_rows(app, ui, st, src, tok, res, k, width);
+    }
+    let bottom = ui.cursor().min.y;
+    ui.painter().line_segment([pos2(r.min.x, bottom), pos2(r.max.x, bottom)], Stroke::new(1.0, t.border));
+}
+
+/// A composite token's fields: one row each (shadow layers and gradient stops in turn, with
+/// buttons to add and remove them).
+#[allow(clippy::too_many_arguments)]
+fn field_rows(
+    app: &mut FigApp,
+    ui: &mut Ui,
+    st: &mut Editor,
+    src: &Src,
+    tok: &dt::RawToken,
+    res: Option<&ResolvedToken>,
+    kind: TokenType,
+    width: f32,
+) {
+    let t = Tokens::get(ui.ctx());
+    let resolved = res.map(|x| &x.value);
+    // Lists: a shadow's layers (one object is one layer), a gradient's stops.
+    let list = match (kind, &tok.value) {
+        (TokenType::Shadow | TokenType::Gradient, Value::Array(a)) => Some(a.len()),
+        (TokenType::Shadow, _) => None,
+        (TokenType::Gradient, _) => Some(0),
+        _ => None,
+    };
+    let row = |ui: &mut Ui, label: &str, indent: f32| -> Rect {
+        let (r, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
+        ui.painter().text(pos2(r.min.x + 40.0 + indent, r.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.text_secondary);
+        r
+    };
+    let one = |app: &mut FigApp, ui: &mut Ui, st: &mut Editor, prefix: &[String], indent: f32| {
+        for (key, fk, label) in fields(kind) {
+            let r = row(ui, tr(label), indent);
+            let sub: Vec<String> = prefix.iter().cloned().chain(std::iter::once((*key).to_string())).collect();
+            let body = Rect::from_min_max(pos2(r.min.x + NAME_W, r.center().y - 11.0), pos2(r.min.x + NAME_W + VALUE_W - 8.0, r.center().y + 11.0));
+            let id = Id::new(("token_field", &tok.path, &sub, format!("{src:?}")));
+            let raw = dt::at_path(&tok.value, &sub).cloned().unwrap_or(Value::Null);
+            let res_part = resolved.and_then(|v| dt::at_path(v, &sub));
+            value_cell(app, ui, st, src, &tok.path, &sub, *fk, &raw, res_part, body, id);
+            if let (FieldKind::Token(k), Some(v)) = (fk, res_part) {
+                let res_r = Rect::from_min_max(pos2(r.min.x + NAME_W + VALUE_W + 16.0, r.min.y), pos2(r.max.x - 12.0, r.max.y));
+                ui.painter().with_clip_rect(res_r).text(
+                    res_r.left_center(),
+                    Align2::LEFT_CENTER,
+                    dt::display(Some(*k), v),
+                    regular(11.0),
+                    t.text_tertiary,
+                );
+            }
+        }
+    };
+    match list {
+        None => one(app, ui, st, &[], 0.0),
+        Some(n) => {
+            let item = if kind == TokenType::Shadow { tr_noop("Shadow {n}") } else { tr_noop("Stop {n}") };
+            for i in 0..n {
+                let r = row(ui, &crate::i18n::trf(item, &[("n", &(i + 1))]), 0.0);
+                let del = Rect::from_center_size(pos2(r.min.x + NAME_W - 20.0, r.center().y), vec2(20.0, 20.0));
+                let min = if kind == TokenType::Gradient { 2 } else { 1 };
+                if n > min
+                    && widgets::icon_button_at(ui, Id::new(("token_item_del", &tok.path, i)), del, Icon::Minus, tr("Remove"))
+                    && let Value::Array(mut a) = tok.value.clone()
+                {
+                    a.remove(i);
+                    app.run("token.set", src.with(json!({"path": tok.path, "value": a})));
+                }
+                one(app, ui, st, &[i.to_string()], 12.0);
+            }
+            let r = row(ui, "", 0.0);
+            let b = Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y + 4.0), vec2(150.0, 22.0));
+            let label = if kind == TokenType::Shadow { tr("+ Add shadow") } else { tr("+ Add stop") };
+            if ui.put(b, egui::Button::new(egui::RichText::new(label).font(regular(11.0))).frame(false)).clicked() {
+                let mut a = tok.value.as_array().cloned().unwrap_or_default();
+                let next = match (kind, a.last()) {
+                    (_, Some(last)) => last.clone(),
+                    (TokenType::Shadow, None) => TokenType::Shadow.default_value(),
+                    _ => json!({"color": dt::color_value(figcraft_color::Color::BLACK), "position": 1}),
+                };
+                a.push(next);
+                app.run("token.set", src.with(json!({"path": tok.path, "value": a})));
+            }
+        }
+    }
+    // One shadow becomes a list when another is added.
+    if kind == TokenType::Shadow && list.is_none() {
+        let r = row(ui, "", 0.0);
+        let b = Rect::from_min_size(pos2(r.min.x + 40.0, r.min.y + 4.0), vec2(150.0, 22.0));
+        if ui.put(b, egui::Button::new(egui::RichText::new(tr("+ Add shadow")).font(regular(11.0))).frame(false)).clicked() {
+            app.run("token.set", src.with(json!({"path": tok.path, "value": [tok.value.clone(), tok.value.clone()]})));
+        }
+    }
+}
+
+/// One value: an alias as a chip (click: pick another; detach: keep what it resolves to), else
+/// its field (a colour with its swatch, a checkbox for booleans), with the alias button on hover.
+#[allow(clippy::too_many_arguments)]
+fn value_cell(
+    app: &mut FigApp,
+    ui: &mut Ui,
+    st: &mut Editor,
+    src: &Src,
+    path: &str,
+    sub: &[String],
+    kind: FieldKind,
+    raw: &Value,
+    resolved: Option<&Value>,
+    body: Rect,
+    id: Id,
+) {
+    let t = Tokens::get(ui.ctx());
+    let FieldKind::Token(k) = kind else {
+        let on = raw.as_bool().unwrap_or(false);
+        let mut child = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(4.0, 0.0))));
+        if widgets::checkbox(&mut child, on, if on { tr("True") } else { tr("False") }) {
+            set_part(app, src, path, sub, json!(!on));
+        }
+        return;
+    };
+    let set = |app: &mut FigApp, v: Value| {
+        if sub.is_empty() {
+            app.run("token.set", src.with(json!({"path": path, "value": v})));
+        } else {
+            set_part(app, src, path, sub, v);
+        }
+    };
+    ui.painter().rect_filled(body, CornerRadius::same(5), t.field);
+    if let Some(target) = dt::alias_of(raw) {
+        let chip = body.shrink2(vec2(3.0, 3.0));
+        let resp = ui.interact(chip, id.with("alias"), Sense::click()).on_hover_text(tr("Change alias"));
+        ui.painter().rect_filled(chip, CornerRadius::same(4), t.hover);
+        let border = if resp.hovered() { t.border_strong } else { t.border };
+        ui.painter().rect_stroke(chip, CornerRadius::same(4), Stroke::new(1.0, border), egui::StrokeKind::Inside);
+        let mut x = chip.min.x + 6.0;
+        if k == TokenType::Color
+            && let Some(c) = resolved.and_then(dt::color_of)
+        {
+            let sw = Rect::from_min_size(pos2(x, chip.center().y - 6.0), vec2(12.0, 12.0));
+            widgets::paint_swatch(ui.painter(), sw, &figcraft_color::Paint::solid(c));
+            x = sw.max.x + 6.0;
+        } else {
+            icons::paint(ui.painter(), Rect::from_min_size(pos2(x, chip.center().y - 6.0), vec2(12.0, 12.0)), Icon::Variable, t.icon_secondary);
+            x += 18.0;
+        }
+        let text_r = Rect::from_min_max(pos2(x, chip.min.y), pos2(chip.max.x - 24.0, chip.max.y));
+        ui.painter().with_clip_rect(text_r).text(text_r.left_center(), Align2::LEFT_CENTER, &target, regular(11.0), t.text);
+        if resp.clicked() {
+            st.alias = Some(AliasPick { path: path.to_string(), sub: sub.to_vec(), kind: k, at: body.left_bottom(), query: String::new() });
+        }
+        // Detach: keep the value it resolves to now.
+        let det = Rect::from_center_size(pos2(chip.max.x - 11.0, chip.center().y), vec2(18.0, 18.0));
+        if let Some(v) = resolved
+            && widgets::icon_button_at(ui, id.with("detach"), det, Icon::Detach, tr("Detach alias"))
+        {
+            set(app, v.clone());
+        }
+        return;
+    }
+    let mut text_r = body.shrink2(vec2(8.0, 3.0));
+    text_r.max.x -= 22.0;
+    if k == TokenType::Color
+        && let Some(c) = dt::color_of(raw)
+    {
+        let cs = Rect::from_center_size(pos2(body.min.x + 13.0, body.center().y), vec2(14.0, 14.0));
+        widgets::paint_swatch(ui.painter(), cs, &figcraft_color::Paint::solid(c));
+        // The colour picker edits whole colour tokens.
+        if sub.is_empty() && ui.interact(cs.expand(3.0), id.with("swatch"), Sense::click()).on_hover_text(tr("Edit colour")).clicked() {
+            let (set, modifier, context) = match src {
+                Src::Set(s) => (Some(s.clone()), None, None),
+                Src::Context(m, c) => (None, Some(m.clone()), Some(c.clone())),
+            };
+            app.ui.picker = Some(PickerTarget::Token { set, modifier, context, path: path.to_string() });
+        }
+        text_r.min.x = cs.max.x + 8.0;
+    }
+    let text = if raw.is_null() { String::new() } else { edit_text(Some(k), raw) };
+    if let Some(edit) = widgets::text_field_inline(ui, id.with("value"), &text, text_r, regular(11.0)) {
+        set(app, parse_edit(Some(k), &edit));
+    }
+    alias_button(ui, st, id, body, path, sub, k);
+}
+
+/// The alias button at the right end of `body`: opens the alias picker for that value.
+fn alias_button(ui: &mut Ui, st: &mut Editor, id: Id, body: Rect, path: &str, sub: &[String], kind: TokenType) {
+    // Shown while the pointer is over the value, as on Local variables.
+    if !ui.rect_contains_pointer(body.expand(4.0)) {
+        return;
+    }
+    let b = Rect::from_center_size(pos2(body.max.x - 12.0, body.center().y), vec2(20.0, 20.0));
+    if widgets::icon_button_at(ui, id.with("mkalias"), b, Icon::Variable, tr("Use another token (alias)")) {
+        st.alias = Some(AliasPick { path: path.to_string(), sub: sub.to_vec(), kind, at: body.left_bottom(), query: String::new() });
+    }
+}
+
+/// The alias picker: tokens of the value's type (resolved as the table shows them), searched by
+/// path; picking one makes the value `{its.path}`.
+fn alias_picker(app: &mut FigApp, ctx: &Context, doc: &Document, st: &mut Editor) {
+    let (Some(mut p), Some(src)) = (st.alias.take(), st.source.clone()) else { return };
+    let t = Tokens::get(ctx);
+    let input = view_input(&doc.tokens, Some(&src));
+    let resolved = doc.tokens.resolve(&input);
+    let q = p.query.trim().to_lowercase();
+    let fits: Vec<&ResolvedToken> = resolved
+        .tokens
+        .values()
+        .filter(|x| x.path != p.path && x.error.is_none() && x.kind == Some(p.kind) && (q.is_empty() || x.path.to_lowercase().contains(&q)))
+        .collect();
+    let mut chosen = None;
+    let area = egui::Area::new(Id::new("token_alias_area")).order(egui::Order::Foreground).fixed_pos(p.at + vec2(0.0, 4.0)).show(ctx, |ui| {
+        egui::Frame::NONE.fill(t.menu).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            ui.set_width(280.0);
+            let title = crate::i18n::trf("Alias: a {type} token", &[("type", &type_label(Some(p.kind)))]);
+            ui.label(egui::RichText::new(title).font(semibold(11.0)).color(t.menu_text));
+            ui.add_space(4.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut p.query).hint_text(tr("Search")).font(regular(11.0)).desired_width(264.0));
+            widgets::select_all_on_focus(ui, &r, &p.query);
+            if !r.has_focus() && !crate::a11y::field_focused(ui.ctx()) {
+                r.request_focus();
+            }
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut group: Option<&str> = None;
+                for tok in &fits {
+                    let g = crate::tokens_ui::group_of(&tok.path);
+                    if group != Some(g) {
+                        group = Some(g);
+                        if !g.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(g.replace('.', " / ")).font(regular(10.0)).color(t.menu_dim));
+                        }
+                    }
+                    if crate::tokens_ui::token_row(ui, tok, 264.0, false) {
+                        chosen = Some(tok.path.clone());
+                    }
+                }
+            });
+            if fits.is_empty() {
+                ui.label(egui::RichText::new(tr("No tokens fit here.")).font(regular(11.0)).color(t.menu_dim));
+            }
+        });
+    });
+    let rect = area.response.rect;
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pos| !rect.contains(pos)));
+    if let Some(target) = chosen {
+        let v = json!(format!("{{{target}}}"));
+        if p.sub.is_empty() {
+            app.run("token.set", src.with(json!({"path": p.path, "value": v})));
+        } else {
+            set_part(app, &src, &p.path, &p.sub, v);
+        }
+        return;
+    }
+    if !outside && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.alias = Some(p);
+    }
 }
 
 fn create_row(app: &mut FigApp, ui: &mut Ui, src: &Src, tree: &Value, st: &mut Editor) {
@@ -955,5 +1318,34 @@ fn details(app: &mut FigApp, ctx: &Context, doc: &Document, st: &mut Editor) {
     if !open {
         st.details = None;
         st.json = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parts_of_composite_values_are_replaced_in_place() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let typo = json!({"fontFamily": "Inter", "fontSize": {"value": 16, "unit": "px"}});
+        let out = with_part(&typo, &s(&["fontFamily"]), json!("{font.body}"));
+        assert_eq!(out["fontFamily"], "{font.body}");
+        assert_eq!(out["fontSize"], typo["fontSize"], "the other fields stay");
+        // A missing field is added; list items by index; out of range changes nothing.
+        assert_eq!(with_part(&typo, &s(&["lineHeight"]), json!(1.5))["lineHeight"], 1.5);
+        let stops = json!([{"color": "#000000", "position": 0}, {"color": "#ffffff", "position": 1}]);
+        assert_eq!(with_part(&stops, &s(&["1", "position"]), json!(0.5))[1]["position"], 0.5);
+        assert_eq!(with_part(&stops, &s(&["9", "position"]), json!(0.5)), stops);
+        assert_eq!(with_part(&stops, &[], json!("{gradient.hero}")), json!("{gradient.hero}"));
+        // Every composite type that expands has fields; each field's type is one the format has.
+        for k in [TokenType::Typography, TokenType::Border, TokenType::Transition, TokenType::Shadow, TokenType::Gradient] {
+            assert!(!fields(k).is_empty(), "{k:?}");
+        }
+        // Defaults of composite types pass with every field present.
+        for k in [TokenType::Typography, TokenType::Border, TokenType::Transition] {
+            let v = k.default_value();
+            assert!(fields(k).iter().all(|(key, _, _)| v.get(key).is_some()), "{k:?}");
+        }
     }
 }
