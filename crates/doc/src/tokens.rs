@@ -1293,6 +1293,16 @@ fn pointer_name(s: &str) -> String {
 
 /// This file's tokens as a DTCG resolver document (sets and modifier contexts inline).
 pub fn to_resolver(t: &DesignTokens, name: &str) -> Value {
+    resolver_with(t, name, &|_| None)
+}
+
+/// A resolver document whose sources are `$ref`s to separate token files: `file` names the file
+/// of each set and context (relative to the resolver document); `None` keeps it inline.
+pub fn resolver_with(t: &DesignTokens, name: &str, file: &dyn Fn(&Source) -> Option<String>) -> Value {
+    let source = |src: Source, tree: &Value| match file(&src) {
+        Some(f) => json!([{ "$ref": f }]),
+        None => json!([tree_or_empty(tree)]),
+    };
     let mut root = Map::new();
     let name = if t.name.is_empty() { name } else { &t.name };
     if !name.is_empty() {
@@ -1308,7 +1318,7 @@ pub fn to_resolver(t: &DesignTokens, name: &str) -> Value {
         if !s.description.is_empty() {
             o.insert("description".into(), json!(s.description));
         }
-        o.insert("sources".into(), json!([tree_or_empty(&s.tokens)]));
+        o.insert("sources".into(), source(Source::Set(s.name.clone()), &s.tokens));
         sets.insert(s.name.clone(), Value::Object(o));
     }
     if !sets.is_empty() {
@@ -1320,7 +1330,11 @@ pub fn to_resolver(t: &DesignTokens, name: &str) -> Value {
         if !m.description.is_empty() {
             o.insert("description".into(), json!(m.description));
         }
-        let ctx: Map<String, Value> = m.contexts.iter().map(|c| (c.name.clone(), json!([tree_or_empty(&c.tokens)]))).collect();
+        let ctx: Map<String, Value> = m
+            .contexts
+            .iter()
+            .map(|c| (c.name.clone(), source(Source::Context { modifier: m.name.clone(), context: c.name.clone() }, &c.tokens)))
+            .collect();
         o.insert("contexts".into(), Value::Object(ctx));
         if let Some(d) = m.default.as_deref().and_then(|d| m.context(d)) {
             o.insert("default".into(), json!(d.name));

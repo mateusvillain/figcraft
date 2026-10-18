@@ -192,3 +192,27 @@ fn the_preference_switches_between_variables_and_tokens() {
     assert_eq!(run(&mut s, "pref.designTokens", json!({}))["on"], true);
     assert_eq!(run(&mut s, "pref.designTokens", json!({"on": false}))["on"], false);
 }
+
+#[test]
+fn zip_bundles_export_and_import_with_a_file_per_set_and_context() {
+    use base64::Engine as _;
+    let mut s = Session::new();
+    themed(&mut s);
+    let data = run(&mut s, "token.export", json!({"format": "zip"}))["data"].as_str().unwrap().to_string();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&data).unwrap();
+    assert!(figcraft_format::tokens_bundle::is_zip(&bytes));
+    // Imported into another file: the same sets, modifiers and order.
+    let mut t = Session::new();
+    let r = run(&mut t, "token.import", json!({"data": data}));
+    assert_eq!((r["sets"].as_u64(), r["modifiers"].as_u64()), (Some(1), Some(1)), "{r}");
+    assert_eq!(t.doc().unwrap().tokens.sets, s.doc().unwrap().tokens.sets);
+    assert_eq!(t.doc().unwrap().tokens.modifiers, s.doc().unwrap().tokens.modifiers);
+    // Each file of the bundle also imports on its own: a context's file into that context.
+    let mut u = Session::new();
+    run(&mut u, "token.createModifier", json!({"name": "theme", "contexts": ["light", "dark"]}));
+    let dark = s.doc().unwrap().tokens.modifier("theme").unwrap().context("dark").unwrap().tokens.clone();
+    run(&mut u, "token.import", json!({"tokens": dark, "modifier": "theme", "context": "dark"}));
+    assert!(u.doc().unwrap().tokens.modifier("theme").unwrap().context("dark").unwrap().tokens["bg"].is_object());
+    assert!(s.execute("token.import", &json!({"data": "not base64!"})).is_err());
+    assert!(s.execute("token.export", &json!({"format": "rar"})).is_err());
+}

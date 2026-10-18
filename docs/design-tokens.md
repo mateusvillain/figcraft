@@ -46,11 +46,30 @@ Bind buttons in the Design panel open the token picker (tokens whose type the fi
 
 ## Import and export
 
-- **Resolver document** (`*.resolver.json`): every set and modifier inline, the resolution order,
-  `version: "2025.10"`. Importing reads inline sources and `$ref`s to files next to it.
-- **Token file** (`*.tokens.json`): one set or context as written, or the merged result for the
-  file's contexts with aliases resolved.
-- The browser build has no open dialog: Import ▸ Paste JSON works everywhere.
+**Export ▸ ZIP** (the default) writes a bundle that follows the resolver module's multi-file
+layout:
+
+```
+tokens.resolver.json                       resolver document: sets and modifiers point ($ref) at the files below
+sets/<set>.tokens.json                     one token file per set
+modifiers/<modifier>/<context>.tokens.json one token file per modifier context
+```
+
+Export also offers a single token file: one set or context as written, or the merged result for
+the file's contexts with aliases resolved.
+
+**Import** takes:
+
+- a ZIP: its resolver document (the shallowest `*.resolver.json`) is followed; without one,
+  `sets/<name>.json` become sets, `modifiers/<modifier>/<context>.json` contexts, and other JSON
+  files sets named after the file;
+- a resolver document on its own (its `$ref`s are read from the files next to it, desktop);
+- a token file on its own: into a set named after the file, or (Import ▸ JSON file into this set
+  or context) into the set or context shown;
+- pasted JSON, and files dropped on the Design tokens window.
+
+In the browser the file chooser reads the file's bytes (`token.import {data}`) and exports
+download.
 
 ## Commands
 

@@ -250,6 +250,15 @@ pub trait Services {
     fn download(&mut self, _name: &str, _bytes: &[u8]) -> bool {
         false
     }
+    /// Ask for a file to read where there are no file paths (the browser): its name and bytes
+    /// arrive later through [`Services::take_opened_bytes`]. False when the platform can't.
+    fn pick_open_bytes(&mut self, _exts: &[&str]) -> bool {
+        false
+    }
+    /// The file [`Services::pick_open_bytes`] asked for, once it has been read.
+    fn take_opened_bytes(&mut self) -> Option<(String, Vec<u8>)> {
+        None
+    }
     /// A folder to write several files into.
     fn pick_folder(&mut self, _title: &str) -> DialogFuture {
         Box::pin(std::future::ready(None))

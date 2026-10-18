@@ -71,6 +71,8 @@ pub struct Editor {
     json: Option<String>,
     /// Pasted JSON waiting to be imported (the paste dialog is open).
     paste: Option<String>,
+    /// A file asked for in the browser, not read yet (and the set or context it goes into).
+    upload: Option<Option<Src>>,
 }
 
 /// A token tree: a set, or a modifier's context.
@@ -170,6 +172,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
         });
     details(app, ctx, &doc, &mut st);
     paste_dialog(app, ctx, &mut st);
+    take_upload(app, ctx, &mut st);
     app.ui.tokens = open.then_some(st);
 }
 
@@ -199,8 +202,8 @@ fn header(app: &mut FigApp, ui: &mut Ui, doc: &Document, st: &mut Editor, open: 
     let mut bar = ui.new_child(UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
     let export = widgets::button(&mut bar, tr("Export…"), false, true);
     crate::right::menu_popup(&export).show(|ui| {
-        if menu_item(ui, tr("Resolver document (sets and modifiers)…"), "") {
-            export_dialog(app, json!({"format": "resolver"}), "resolver");
+        if menu_item(ui, tr("ZIP: resolver and a file per set and context…"), "") {
+            export_zip(app);
             ui.close();
         }
         if let Some(src) = &st.source
@@ -215,11 +218,17 @@ fn header(app: &mut FigApp, ui: &mut Ui, doc: &Document, st: &mut Editor, open: 
         }
     });
     bar.add_space(6.0);
-    let import = widgets::button(&mut bar, tr("Import…"), false, true);
+    let import = widgets::button(&mut bar, tr("Import…"), false, true)
+        .on_hover_text(tr("A ZIP of sets and modifiers, a resolver document or a token file. Files can also be dropped here."));
     crate::right::menu_popup(&import).show(|ui| {
-        // The browser has no open dialog: pasting works everywhere.
-        if !app.services.downloads() && menu_item(ui, tr("From a file…"), "") {
-            import_dialog(app);
+        if menu_item(ui, tr("ZIP or JSON file…"), "") {
+            import_file(app, st, None);
+            ui.close();
+        }
+        if let Some(src) = st.source.clone()
+            && menu_item(ui, tr("JSON file into this set or context…"), "")
+        {
+            import_file(app, st, Some(src));
             ui.close();
         }
         if menu_item(ui, tr("Paste JSON…"), "") {
@@ -265,11 +274,73 @@ fn export_dialog(app: &mut FigApp, params: Value, kind: &str) {
     });
 }
 
-fn import_dialog(app: &mut FigApp) {
-    app.pick_open(tr("Import design tokens"), &["json"], |app, p| {
-        let r = app.run("token.import", json!({"tokens": p.to_string_lossy()}));
+/// Export every set and modifier as a ZIP: the resolver document and a token file each.
+fn export_zip(app: &mut FigApp) {
+    let base = app.session.doc().map(|d| d.name.clone()).unwrap_or_else(|_| "tokens".into());
+    let name = format!("{base}.tokens.zip");
+    if app.services.downloads() {
+        use base64::Engine as _;
+        let Some(r) = app.run("token.export", json!({"format": "zip"})) else { return };
+        let bytes = base64::engine::general_purpose::STANDARD.decode(r["data"].as_str().unwrap_or_default()).unwrap_or_default();
+        if !bytes.is_empty() && app.services.download(&name, &bytes) {
+            app.toast(trf("Exported {file}", &[("file", &name)]));
+        } else {
+            app.toast(tr("Couldn't download the design tokens"));
+        }
+        return;
+    }
+    app.pick_save(tr("Export design tokens"), &name, &["zip"], move |app, p| {
+        if app.run("token.export", json!({"format": "zip", "path": p.to_string_lossy()})).is_some() {
+            let file = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            app.toast(trf("Exported {file}", &[("file", &file)]));
+        }
+    });
+}
+
+/// Import a ZIP or JSON file (`into`: a token file goes into that set or context). The browser
+/// has no paths: the file's bytes arrive in a later frame ([`take_upload`]).
+fn import_file(app: &mut FigApp, st: &mut Editor, into: Option<Src>) {
+    let exts: &[&str] = if into.is_some() { &["json"] } else { &["zip", "json"] };
+    if app.services.downloads() {
+        if app.services.pick_open_bytes(exts) {
+            st.upload = Some(into);
+        }
+        return;
+    }
+    app.pick_open(tr("Import design tokens"), exts, move |app, p| {
+        let mut params = into.as_ref().map(Src::params).unwrap_or_default();
+        params.insert("tokens".into(), json!(p.to_string_lossy()));
+        let r = app.run("token.import", Value::Object(params));
         import_toast(app, r);
     });
+}
+
+/// Import a file read in the browser, or dropped on the editor, as bytes.
+fn import_bytes(app: &mut FigApp, into: Option<&Src>, bytes: &[u8]) {
+    use base64::Engine as _;
+    let mut params = into.map(Src::params).unwrap_or_default();
+    params.insert("data".into(), json!(base64::engine::general_purpose::STANDARD.encode(bytes)));
+    let r = app.run("token.import", Value::Object(params));
+    import_toast(app, r);
+}
+
+/// A picked file the browser has finished reading, and files dropped while the editor is open.
+fn take_upload(app: &mut FigApp, ctx: &Context, st: &mut Editor) {
+    if let Some(into) = st.upload.clone()
+        && let Some((_, bytes)) = app.services.take_opened_bytes()
+    {
+        st.upload = None;
+        import_bytes(app, into.as_ref(), &bytes);
+    }
+    for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+        let path = f.path().to_path_buf();
+        if path.exists() {
+            let r = app.run("token.import", json!({"tokens": path.to_string_lossy()}));
+            import_toast(app, r);
+        } else if let Some(bytes) = crate::dropped_bytes(&f) {
+            import_bytes(app, None, &bytes);
+        }
+    }
 }
 
 fn import_toast(app: &mut FigApp, r: Option<Value>) {

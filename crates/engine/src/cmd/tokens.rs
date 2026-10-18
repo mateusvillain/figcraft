@@ -84,14 +84,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "token.import",
             "Import design tokens",
-            "{tokens (a DTCG token file or resolver document: an object, JSON text or a path), set? (for a token file: the set it goes into; default its file name or \"tokens\"), modifier?+context? (put a token file in a context instead), replace? (a resolver document replaces this file's tokens instead of joining them)}  → {sets, modifiers, tokens, warnings}",
+            "{tokens (a zip of token files (with a resolver document, or sets/<set>.json and modifiers/<modifier>/<context>.json), a DTCG token file or resolver document: an object, JSON text or a path) | data (the same as base64 bytes), set? (for a token file: the set it goes into; default its file name or \"tokens\"), modifier?+context? (put a token file in a context instead), replace? (a resolver document replaces this file's tokens instead of joining them)}  → {sets, modifiers, tokens, warnings}",
             true,
             import
         ),
         spec!(
             "token.export",
             "Export design tokens",
-            "{format? (resolver (default): a DTCG resolver document with every set and modifier | tokens: one DTCG token file), set? | modifier+context? (tokens: that source only), input? ({modifier: context}, tokens: the merged result for these contexts; default the file's), resolveAliases? (tokens: values instead of aliases), path? (write it there)}  → {text}, or {path} when written",
+            "{format? (zip: a resolver document (tokens.resolver.json) pointing at a token file per set (sets/<set>.tokens.json) and per modifier context (modifiers/<modifier>/<context>.tokens.json), base64 in `data` unless written | resolver (default): one DTCG resolver document with every set and modifier inline | tokens: one DTCG token file), set? | modifier+context? (tokens: that source only), input? ({modifier: context}, tokens: the merged result for these contexts; default the file's), resolveAliases? (tokens: values instead of aliases), path? (write it there)}  → {text}, or {path} when written",
             false,
             export
         ),
@@ -1019,36 +1019,62 @@ fn dash_pattern(v: &Value, w: f64) -> Vec<f64> {
 // ----- Import and export -----
 
 /// The JSON a `tokens` param holds (object, text or path), with the path it came from.
-fn tokens_param(cmd: &str, p: &Value) -> Result<(Value, Option<String>)> {
-    let parse = |text: &[u8]| serde_json::from_slice::<Value>(text).map_err(|e| bad(cmd, format!("tokens: {e}")));
-    match get(p, "tokens") {
-        Some(v @ Value::Object(_)) => Ok((v.clone(), None)),
-        Some(Value::String(s)) if s.trim_start().starts_with('{') => Ok((parse(s.as_bytes())?, None)),
-        Some(Value::String(path)) => Ok((parse(&super::file::read_capped(path, MAX_FILE)?)?, Some(path.clone()))),
-        _ => Err(bad(cmd, "tokens: a DTCG token file or resolver document (an object, JSON text or a path)")),
+fn tokens_param(cmd: &str, p: &Value) -> Result<(Input, Option<String>)> {
+    let parse = |text: &[u8]| serde_json::from_slice::<Value>(text).map(Input::Json).map_err(|e| bad(cmd, format!("tokens: {e}")));
+    let bytes = |b: Vec<u8>| if figcraft_format::tokens_bundle::is_zip(&b) { Ok(Input::Zip(b)) } else { parse(&b) };
+    match (get(p, "tokens"), get(p, "data")) {
+        (Some(v @ Value::Object(_)), _) => Ok((Input::Json(v.clone()), None)),
+        (Some(Value::String(s)), _) if s.trim_start().starts_with('{') => Ok((parse(s.as_bytes())?, None)),
+        (Some(Value::String(path)), _) => Ok((bytes(super::file::read_capped(path, MAX_FILE)?)?, Some(path.clone()))),
+        (None | Some(Value::Null), Some(Value::String(b64))) => {
+            use base64::Engine as _;
+            if b64.len() as u64 > MAX_FILE * 4 / 3 + 4 {
+                return Err(bad(cmd, "data: too large"));
+            }
+            let b = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| bad(cmd, format!("data: {e}")))?;
+            Ok((bytes(b)?, None))
+        }
+        _ => Err(bad(cmd, "tokens: a token zip, DTCG token file or resolver document (an object, JSON text or a path), or data (base64)")),
     }
+}
+
+/// What an import reads: one JSON document, or a zip of token files.
+enum Input {
+    Json(Value),
+    Zip(Vec<u8>),
 }
 
 fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "token.import";
-    let (v, path) = tokens_param(cmd, p)?;
+    let (input, path) = tokens_param(cmd, p)?;
     let replace = boolean(p, "replace").unwrap_or(false);
     let set_name = name_param(cmd, p, "set")?;
     let doc = s.doc_mut()?;
     let mut warnings = Vec::new();
     let (added_sets, added_mods);
-    if dt::is_resolver(&v) {
-        let dir = path.as_deref().and_then(|x| std::path::Path::new(x).parent()).map(std::path::Path::to_path_buf);
-        let load = |file: &str| -> Option<Value> {
-            let dir = dir.as_ref()?;
-            // Only files next to the document or below it.
-            if file.contains("..") || std::path::Path::new(file).is_absolute() {
-                return None;
-            }
-            let bytes = super::file::read_capped(&dir.join(file).to_string_lossy(), MAX_FILE).ok()?;
-            serde_json::from_slice(&bytes).ok()
-        };
-        let (t, w) = dt::from_resolver(&v, &load).map_err(|e| bad(cmd, e))?;
+    // A zip, or a resolver document: whole sets and modifiers.
+    let whole = match &input {
+        Input::Zip(b) => Some(figcraft_format::tokens_bundle::read(b).map_err(|e| bad(cmd, e.to_string()))?),
+        Input::Json(v) if dt::is_resolver(v) => {
+            let dir = path.as_deref().and_then(|x| std::path::Path::new(x).parent()).map(std::path::Path::to_path_buf);
+            let load = |file: &str| -> Option<Value> {
+                let dir = dir.as_ref()?;
+                // Only files next to the document or below it.
+                if file.contains("..") || std::path::Path::new(file).is_absolute() {
+                    return None;
+                }
+                let bytes = super::file::read_capped(&dir.join(file).to_string_lossy(), MAX_FILE).ok()?;
+                serde_json::from_slice(&bytes).ok()
+            };
+            Some(dt::from_resolver(v, &load).map_err(|e| bad(cmd, e))?)
+        }
+        Input::Json(_) => None,
+    };
+    let v = match input {
+        Input::Json(v) => v,
+        Input::Zip(_) => Value::Null,
+    };
+    if let Some((t, w)) = whole {
         warnings.extend(w);
         added_sets = t.sets.len();
         added_mods = t.modifiers.len();
@@ -1142,7 +1168,21 @@ fn join(into: &mut DesignTokens, t: DesignTokens) {
 fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "token.export";
     let doc = s.doc()?;
-    let value = match string(p, "format").as_deref().unwrap_or("resolver") {
+    let format = string(p, "format").unwrap_or_else(|| "resolver".into());
+    if format == "zip" {
+        let bytes = figcraft_format::tokens_bundle::write(&doc.tokens, &doc.name).map_err(|e| EngineError::Other(e.to_string()))?;
+        return match string(p, "path") {
+            Some(path) => {
+                super::file::write(&path, &bytes)?;
+                Ok(json!({"path": path}))
+            }
+            None => {
+                use base64::Engine as _;
+                Ok(json!({"data": base64::engine::general_purpose::STANDARD.encode(&bytes)}))
+            }
+        };
+    }
+    let value = match format.as_str() {
         "resolver" => dt::to_resolver(&doc.tokens, &doc.name),
         "tokens" => {
             let tree = if get(p, "set").is_some() || get(p, "modifier").is_some() {
@@ -1154,7 +1194,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
             };
             if boolean(p, "resolveAliases").unwrap_or(false) { resolved_tree(&tree) } else { tree }
         }
-        _ => return Err(bad(cmd, "format: resolver|tokens")),
+        _ => return Err(bad(cmd, "format: zip|resolver|tokens")),
     };
     let text = serde_json::to_string_pretty(&value).map_err(|e| EngineError::Other(e.to_string()))?;
     match string(p, "path") {
