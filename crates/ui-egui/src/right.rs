@@ -370,7 +370,9 @@ fn design(app: &mut FigApp, ui: &mut Ui) {
     }
     appearance(app, ui, &doc, &sel);
     widgets::separator(ui);
-    if variable_modes(app, ui, &doc, &sel) {
+    let modes =
+        if app.session.prefs.design_tokens { crate::tokens_ui::contexts_section(app, ui, &doc, &sel) } else { variable_modes(app, ui, &doc, &sel) };
+    if modes {
         widgets::separator(ui);
     }
     if sel.iter().any(|i| matches!(doc.node(*i).map(|n| &n.kind), Some(NodeKind::Text(_)))) {
@@ -435,17 +437,31 @@ fn page_section(app: &mut FigApp, ui: &mut Ui, doc: &Document) {
         });
     });
     widgets::separator(ui);
-    // Local variables & styles.
-    let vars = doc.variables.variables.iter().filter(|v| !figcraft_engine::library::is_remote_variable(doc, &v.id)).count();
-    widgets::section_header(ui, tr("Local variables"), &[], vars == 0);
-    row(ui, 32.0, |ui| {
-        let r = widgets::dropdown(ui, &trf("Open variables ({count})", &[("count", &vars)]), 200.0, Some(Icon::Styles));
-        if r.clicked() {
-            app.ui.preferences = false;
-            app.ui.palette = None;
-            app.ui.variables.get_or_insert_with(Default::default);
-        }
-    });
+    // Local variables (or design tokens) & styles.
+    if app.session.prefs.design_tokens {
+        let input = doc.tokens.input_for(&Default::default());
+        let n = doc.tokens.resolve(&input).tokens.len();
+        widgets::section_header(ui, tr("Design tokens"), &[], n == 0);
+        row(ui, 32.0, |ui| {
+            let r = widgets::dropdown(ui, &trf("Open design tokens ({count})", &[("count", &n)]), 200.0, Some(Icon::Variable));
+            if r.clicked() {
+                app.ui.preferences = false;
+                app.ui.palette = None;
+                app.ui.tokens.get_or_insert_with(Default::default);
+            }
+        });
+    } else {
+        let vars = doc.variables.variables.iter().filter(|v| !figcraft_engine::library::is_remote_variable(doc, &v.id)).count();
+        widgets::section_header(ui, tr("Local variables"), &[], vars == 0);
+        row(ui, 32.0, |ui| {
+            let r = widgets::dropdown(ui, &trf("Open variables ({count})", &[("count", &vars)]), 200.0, Some(Icon::Styles));
+            if r.clicked() {
+                app.ui.preferences = false;
+                app.ui.palette = None;
+                app.ui.variables.get_or_insert_with(Default::default);
+            }
+        });
+    }
     widgets::separator(ui);
     widgets::section_header(ui, tr("Local styles"), &[], figcraft_engine::library::local_styles(doc).next().is_none());
     crate::style_picker::local_styles(app, ui, doc);
@@ -1098,13 +1114,16 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
     let title = if fills { tr("Fill") } else { tr("Stroke") };
     let empty = list.as_ref().is_none_or(|l| l.is_empty());
     let slot = if fills { StyleSlot::Fill } else { StyleSlot::Stroke };
-    if let Some(i) = widgets::section_header(
-        ui,
-        title,
-        &[(Icon::Styles, tr("Styles")), (Icon::Plus, if fills { tr("Add fill") } else { tr("Add stroke") })],
-        empty,
-    ) {
-        if i == 1 {
+    let mut buttons = vec![(Icon::Styles, tr("Styles")), (Icon::Plus, if fills { tr("Add fill") } else { tr("Add stroke") })];
+    // Working with design tokens: a gradient token for the top fill, a border token for strokes.
+    let token_field = if fills { format!("fills/{}/gradient", list.as_ref().map_or(0, |l| l.len().saturating_sub(1))) } else { "border".to_string() };
+    if app.session.prefs.design_tokens {
+        buttons.push((Icon::Variable, if fills { tr("Apply gradient token") } else { tr("Apply border token") }));
+    }
+    if let Some(i) = widgets::section_header(ui, title, &buttons, empty) {
+        if i == 2 {
+            crate::tokens_ui::open_at_pointer(ui, &ids, &token_field);
+        } else if i == 1 {
             // The new paint goes on top; open its picker. A mixed selection has no one index to edit.
             if app.run(if fills { "fill.add" } else { "stroke.add" }, json!({"ids": ids})).is_some()
                 && let Some(l) = &list
@@ -1114,6 +1133,17 @@ fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], fills: 
         } else {
             style_picker::open(app, ui, &ids, slot);
         }
+    }
+    if !fills {
+        crate::variable_ui::bound_row(app, ui, &ids, "border", VariableType::Color, Lead::Icon(Icon::Styles, tr("Border")), f32::INFINITY);
+    }
+    let gradients: Vec<String> = ids
+        .first()
+        .and_then(|i| doc.node(*i))
+        .map(|n| n.token_bound.keys().filter(|k| fills && k.starts_with("fills/") && k.ends_with("/gradient")).cloned().collect())
+        .unwrap_or_default();
+    for key in gradients {
+        crate::variable_ui::bound_row(app, ui, &ids, &key, VariableType::Color, Lead::Icon(Icon::GradientLinear, tr("Gradient")), f32::INFINITY);
     }
     style_picker::chip(app, ui, doc, &ids, slot);
     match &list {
@@ -1550,7 +1580,8 @@ fn paint_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &Paint,
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_r));
         // The variable bound to this paint's colour (its key on the layers: `fill` or `fills/<i>/color`).
         let bound = app.session.doc().ok().and_then(|d| {
-            let key = ids.first().and_then(|id| d.node(*id)).and_then(|n| figcraft_engine::cmd::lists::paint_binding_key(n, fills, i))?;
+            let n = ids.first().and_then(|id| d.node(*id))?;
+            let key = crate::tokens_ui::paint_key(n, fills, i).or_else(|| figcraft_engine::cmd::lists::paint_binding_key(n, fills, i))?;
             Some((key.to_string(), crate::variable_ui::bound_name(d, &ids, key)?))
         });
         match &p.kind {
@@ -1572,7 +1603,7 @@ fn paint_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &Paint,
                 let dresp = ui.interact(dr, Id::new(("detach_paint", fills, i)), Sense::click()).tip(tr("Detach variable"));
                 icons::paint(ui.painter(), dr.shrink(3.0), Icon::Detach, t.icon_secondary);
                 if dresp.clicked() {
-                    app.run("variable.bind", json!({"ids": ids, "field": key, "variable": null}));
+                    crate::variable_ui::detach(app, &ids, &key);
                 }
             }
             PaintKind::Solid { color } => {
@@ -1637,13 +1668,20 @@ fn effects(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let ids = sel.to_vec();
     let list = common(doc, sel, |n| n.effects.clone());
     let empty = list.as_ref().is_none_or(|l| l.is_empty());
-    if let Some(i) = widgets::section_header(ui, tr("Effects"), &[(Icon::Styles, tr("Styles")), (Icon::Plus, tr("Add effect"))], empty) {
-        if i == 1 {
-            app.run("effect.add", json!({"ids": ids, "type": "dropShadow"}));
-        } else {
-            style_picker::open(app, ui, &ids, StyleSlot::Effect);
+    let mut buttons = vec![(Icon::Styles, tr("Styles")), (Icon::Plus, tr("Add effect"))];
+    if app.session.prefs.design_tokens {
+        buttons.push((Icon::Variable, tr("Apply shadow token")));
+    }
+    if let Some(i) = widgets::section_header(ui, tr("Effects"), &buttons, empty) {
+        match i {
+            1 => {
+                app.run("effect.add", json!({"ids": ids, "type": "dropShadow"}));
+            }
+            2 => crate::tokens_ui::open_at_pointer(ui, &ids, "shadow"),
+            _ => style_picker::open(app, ui, &ids, StyleSlot::Effect),
         }
     }
+    crate::variable_ui::bound_row(app, ui, &ids, "shadow", VariableType::Color, Lead::Icon(Icon::Effects, tr("Shadow")), f32::INFINITY);
     style_picker::chip(app, ui, doc, &ids, StyleSlot::Effect);
     let Some(list) = list else { return };
     let mut drag = ListDrag::new(ui, "effects");

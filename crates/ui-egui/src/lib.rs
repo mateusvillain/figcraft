@@ -59,6 +59,8 @@ pub mod shortcuts_panel;
 pub mod style_picker;
 pub mod tabs;
 pub mod theme;
+pub mod tokens_panel;
+pub mod tokens_ui;
 pub mod toolbar;
 pub mod typography;
 pub mod variable_ui;
@@ -451,6 +453,8 @@ pub struct UiState {
     pub actions_rect: Option<egui::Rect>,
     /// The Variables editor, when open.
     pub variables: Option<variables_panel::Editor>,
+    /// The Design tokens editor, when open.
+    pub tokens: Option<tokens_panel::Editor>,
     pub about: bool,
     /// The tab the About window shows.
     pub about_tab: dialogs::AboutTab,
@@ -607,6 +611,7 @@ impl Default for UiState {
             palette_armed: false,
             actions_rect: None,
             variables: None,
+            tokens: None,
             about: false,
             about_tab: dialogs::AboutTab::About,
             preferences: false,
@@ -1428,6 +1433,7 @@ impl FigApp {
         self.poll_dialog(&ctx);
         // Control requests run first so their results reflect this frame.
         control::drain(self, &ctx);
+        tokens_ui::set_mode(&ctx, self.session.prefs.design_tokens);
         windows::requests(self, &ctx);
         selection_spacing::sync(self, &ctx);
         // Before any widget: the navigation keys (F6, Tab, arrows, Escape) move the keyboard.
@@ -1550,6 +1556,7 @@ impl FigApp {
         shortcuts::handle(self, &ctx, typing, swallowed);
         menus::popups(self, &ctx);
         variable_ui::picker(self, &ctx);
+        tokens_ui::picker(self, &ctx);
         style_picker::show(self, &ctx);
         self.end_unwanted_text_preview(&ctx);
         self.end_pen_outside_design();
@@ -1678,6 +1685,8 @@ impl FigApp {
             "lastError": self.ui.last_error,
             "importReport": self.ui.import_report.as_ref().map(import_report::Report::inspect),
         });
+        state["tokens"] = json!(self.ui.tokens.is_some());
+        state["designTokens"] = json!(self.session.prefs.design_tokens);
         state["homeSearch"] = json!(self.ui.home_view.file_query);
         state["pendingOpens"] = json!(self.ui.pending_opens.len());
         state["missingFonts"] = json!(self.ui.missing_fonts.as_ref().map(missing_fonts::Shown::inspect));

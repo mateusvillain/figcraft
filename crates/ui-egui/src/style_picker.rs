@@ -264,6 +264,8 @@ impl Key {
 enum Act {
     Apply(Key),
     Bind(crate::variable_ui::Pick),
+    /// Bind a design token (path) to the slot's paint colour.
+    BindToken(String),
     Create,
     Detach,
     Edit(String),
@@ -554,11 +556,24 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
             sources.push((Some(l.as_ref()), list));
         }
     }
-    let colors = if slot.paints() {
+    // Working with design tokens, colour slots offer colour tokens instead of colour variables.
+    let use_tokens = app.session.prefs.design_tokens;
+    let colors = if slot.paints() && !use_tokens {
         crate::variable_ui::groups(doc, &libs, |_, v| v.kind == VariableType::Color && (q.is_empty() || v.name.to_lowercase().contains(&q)))
     } else {
         Vec::new()
     };
+    let resolved = if slot.paints() && use_tokens {
+        let input = p.ids.first().map(|i| doc.token_input_for(*i)).unwrap_or_default();
+        doc.tokens.resolve(&input)
+    } else {
+        Default::default()
+    };
+    let color_tokens: Vec<&figcraft_doc::ResolvedToken> = resolved
+        .tokens
+        .values()
+        .filter(|x| x.error.is_none() && x.kind == Some(figcraft_doc::TokenType::Color) && (q.is_empty() || x.path.to_lowercase().contains(&q)))
+        .collect();
     egui::ScrollArea::vertical().id_salt("style_picker_scroll").max_height(320.0).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         if sources.iter().all(|(_, l)| l.is_empty()) {
@@ -621,6 +636,15 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
         if !colors.is_empty() {
             ui.add_space(6.0);
             caption(ui, tr("Color variables"));
+        }
+        if !color_tokens.is_empty() {
+            ui.add_space(6.0);
+            caption(ui, tr("Color tokens"));
+        }
+        for tok in &color_tokens {
+            if crate::tokens_ui::token_row(ui, tok, W, false) {
+                out.act = Some(Act::BindToken(tok.path.clone()));
+            }
         }
         for (lib, c, vars) in &colors {
             crate::variable_ui::group_caption(ui, *lib, c);
@@ -936,6 +960,10 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
         }
         Some(Act::Bind(pick)) => {
             crate::variable_ui::bind(app, &ids, slot.key(), &pick);
+            close = true;
+        }
+        Some(Act::BindToken(path)) => {
+            app.run("token.bind", json!({"ids": ids, "field": slot.key(), "token": path}));
             close = true;
         }
         Some(Act::Detach) => {
